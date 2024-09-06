@@ -60,23 +60,14 @@ def process_events():
             reply_root TEXT,
             repost_uri TEXT,
             created_at TEXT,
-            author TEXT,
-            FOREIGN KEY (author)
-                REFERENCES person (did)
-                    ON DELETE SET NULL
+            author TEXT
         )""")
     cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_post_uri ON post (uri)')
     cur.execute(
         """CREATE TABLE IF NOT EXISTS follow(
             uri TEXT PRIMARY KEY,
             follower TEXT,
-            followee TEXT,
-            FOREIGN KEY (follower)
-                REFERENCES person (did)
-                    ON DELETE SET NULL
-            FOREIGN KEY (followee)
-                REFERENCES person (did)
-                    ON DELETE SET NULL
+            followee TEXT
         )"""
     )
     cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_uri ON follow (uri)')
