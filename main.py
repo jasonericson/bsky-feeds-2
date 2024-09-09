@@ -94,7 +94,7 @@ def process_events():
             record = created_post['record']
 
             reply_root = reply_parent = None
-            if record.reply:
+            if hasattr(record, 'reply') and record.reply:
                 if record.reply.root is None or record.reply.parent is None:
                     continue
                 reply_root = record.reply.root.uri
@@ -134,11 +134,11 @@ def process_events():
         authors = []
         created_repost_infos = []
         for created_repost in repost_collection.created:
-            if record.subject is None:
-                continue
-
             record = created_repost['record']
             author = created_repost['author']
+            
+            if not hasattr(record, 'subject') or record.subject is None:
+                continue
 
             authors.append((
                 author,
