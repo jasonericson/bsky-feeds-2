@@ -39,7 +39,8 @@ for i in range(num_record_collections):
     record_collections_cycle.append(record_collections)
 cycle_mutex = Lock()
 
-last_time = time()
+last_cycle_time = time()
+last_purge_time = 0
 curr_num_records = 0
 
 def process_events():
@@ -201,6 +202,11 @@ def process_events():
             cur.executemany('DELETE FROM follow WHERE uri = ?', deleted_follow_infos)
             print(f'Deleted {len(deleted_follow_infos)} follows from database.')
 
+        time_since_last_purge = time() - last_purge_time
+        if time_since_last_purge >= 30.0 * 60.0:
+            cur.execute("DELETE FROM post WHERE created_at <= datetime('now', '-24 hours')")
+            last_purge_time = time()
+
         con.commit()
 
         # print(f'Number of events for idx {last_record_collection_idx}')
@@ -266,8 +272,8 @@ def main():
                         break
 
         curr_time = time()
-        global last_time
-        if curr_time - last_time >= 1.0:
+        global last_cycle_time
+        if curr_time - last_cycle_time >= 1.0:
             num_records_history.append(curr_num_records)
             while len(num_records_history) > 20:
                 num_records_history.pop()
@@ -277,7 +283,7 @@ def main():
             avg /= len(num_records_history)
 
             curr_num_records = 0
-            last_time = curr_time
+            last_cycle_time = curr_time
 
     t = Thread(target = process_events)
     t.start()
