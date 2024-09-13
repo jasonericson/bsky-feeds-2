@@ -74,9 +74,14 @@ def process_events():
     cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_uri ON follow (uri)')
     con.commit()
 
+    last_update_time = time()
     db_update_interval = 2.0
     while True:
-        sleep(db_update_interval)
+        time_since_last_update = time() - last_update_time
+        wait_time = db_update_interval - time_since_last_update
+        if wait_time >= 0.0:
+            sleep(wait_time)
+        last_update_time = time()
 
         start_time = time_ns()
 
