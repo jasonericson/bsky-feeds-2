@@ -210,7 +210,7 @@ def process_events():
         global last_purge_time
         time_since_last_purge = time() - last_purge_time
         if time_since_last_purge >= 30.0 * 60.0:
-            cur.execute("DELETE FROM post WHERE created_at <= datetime('now', '-24 hours')")
+            cur.execute("DELETE FROM post WHERE created_at <= datetime('now', '-12 hours')")
             print('Purged old posts.')
             last_purge_time = time()
 
