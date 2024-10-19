@@ -1,4 +1,5 @@
 from flask import Flask, jsonify, request
+from waitress import serve
 
 HOSTNAME = 'bskyfeed.jasonericson.com'
 SERVICE_DID = f'did:web:{HOSTNAME}'
@@ -41,8 +42,11 @@ def get_feed_skeleton():
     try:
         cursor = request.args.get('cursor', default=None, type=str)
         limit = request.args.get('limit', default=20, type=int)
-        body = { 'cursor': cursor, 'feed': [{'post': 'at://did:plc:da4qrww7zq3flsr2zialldef/app.bsky.feed.post/3l6qmib2wct2s'}] }
+        body = { 'feed': [{'post': 'at://did:plc:da4qrww7zq3flsr2zialldef/app.bsky.feed.post/3l3w3xxig4o2h'}] }
     except ValueError:
         return 'Malformed cursor', 400
     
     return jsonify(body)
+
+if __name__ == '__main__':
+    serve(app, host='0.0.0.0', port=5000)
