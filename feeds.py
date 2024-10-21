@@ -1,6 +1,6 @@
 from atproto import Client, DidInMemoryCache, IdResolver, models, verify_jwt
 from atproto.exceptions import TokenInvalidSignatureError
-import bisect
+import config
 import fcntl
 from flask import Flask, jsonify, request
 import random
@@ -8,13 +8,9 @@ import sqlite3
 from time import time_ns
 from waitress import serve
 
-HANDLE: str = 'singpigtest.bsky.social'
-PASSWORD: str = 'mczv-ak5r-3st6-hpkr'
-HOSTNAME = 'bskyfeed.jasonericson.com'
-# HOSTNAME = 'bee-upward-physically.ngrok-free.app'
-SERVICE_DID = f'did:web:{HOSTNAME}'
-URI = 'at://did:plc:da4qrww7zq3flsr2zialldef/app.bsky.feed.generator/chaos'
-# URI = 'at://did:plc:str7htuk7asez6oi2pxgknci/app.bsky.feed.generator/chaos'
+SERVICE_DID = f'did:web:{config.HOSTNAME}'
+URI = config.FEEDS['random_from_follows']['uri']
+# URI = 'at://did:plc:da4qrww7zq3flsr2zialldef/app.bsky.feed.generator/chaos'
 
 CACHE = DidInMemoryCache()
 ID_RESOLVER = IdResolver(cache=CACHE)
@@ -44,7 +40,7 @@ def did_json():
             {
                 'id': '#bsky_fg',
                 'type': 'BskyFeedGenerator',
-                'serviceEndpoint': f'https://{HOSTNAME}'
+                'serviceEndpoint': f'https://{config.HOSTNAME}'
             }
         ]
     })

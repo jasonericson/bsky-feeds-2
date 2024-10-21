@@ -1,0 +1,8 @@
+handle: ''
+password: ''
+hostname: ''
+feeds:
+- record_name: 'chaos'
+- uri: ''
+- display_name: 'Random From Follows'
+- description: 'Random collection of posts from your follows, from the last 12 hours.'

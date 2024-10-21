@@ -186,3 +186,4 @@ firehose.db
 firehose.db.lock
 
 firehose.db-journal
+config.yml
