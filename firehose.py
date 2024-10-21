@@ -2,6 +2,8 @@ from atproto import AtUri, CAR, firehose_models, FirehoseSubscribeReposClient, m
 from dataclasses import dataclass, field
 from dateutil import parser
 from enum import auto, Enum
+import fcntl
+import os
 import sqlite3
 from threading import Lock, Thread
 from time import sleep, time, time_ns
@@ -91,6 +93,11 @@ def process_events():
             curr_record_collection_idx = (last_record_collection_idx + 1) % num_record_collections
         record_collections = record_collections_cycle[last_record_collection_idx]
         
+        # Acquire lock on db
+        lock_file = open('./firehose.db.lock', 'w+')
+        print('Acquiring db lock')
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+
         # Posts
         post_collection = record_collections[RecordType.Post.value]
         authors = []
@@ -214,7 +221,11 @@ def process_events():
             print('Purged old posts.')
             last_purge_time = time()
 
+        print('Committing queries')
         con.commit()
+        print('Unlocking db')
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
 
         # print(f'Number of events for idx {last_record_collection_idx}')
         # total_events = 0
@@ -299,23 +310,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # con = sqlite3.connect('test.db')
-    # cur = con.cursor()
-
-    # cur.execute(
-    #     """CREATE TABLE IF NOT EXISTS post(
-    #         uri TEXT PRIMARY KEY,
-    #         label TEXT,
-    #         desc TEXT
-    #     )""")
-
-    # created_post_infos = []
-    # created_post_infos.append((
-    #     'a',
-    #     'b',
-    #     'c',
-    # ))
-
-    # cur.executemany('INSERT INTO post VALUES(?, ?, ?)', [('a', 'b', 'c')])
-    # cur.executemany('DELETE FROM post WHERE uri = ?', [('a')])
-    # con.commit()
