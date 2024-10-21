@@ -1,5 +1,6 @@
 from atproto import AtUri, CAR, firehose_models, FirehoseSubscribeReposClient, models, parse_subscribe_repos_message
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from dateutil import parser
 from enum import auto, Enum
 import fcntl
@@ -50,30 +51,31 @@ def process_events():
     cur = con.cursor()
 
     cur.execute(
-        """CREATE TABLE IF NOT EXISTS person(
+        """CREATE TABLE IF NOT EXISTS people(
             did TEXT PRIMARY KEY,
             follows_primed BOOLEAN
         )""")
-    cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_person_did ON person (did)')
+    cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_people_did ON people (did)')
     cur.execute(
-        """CREATE TABLE IF NOT EXISTS post(
+        """CREATE TABLE IF NOT EXISTS posts(
             uri TEXT PRIMARY KEY,
-            cid TEXT,
+            cid_rev TEXT,
             reply_parent TEXT,
             reply_root TEXT,
             repost_uri TEXT,
-            created_at TEXT,
+            created_at INTEGER,
             author TEXT
         )""")
-    cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_post_uri ON post (uri)')
+    cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_uri ON posts (uri)')
     cur.execute(
-        """CREATE TABLE IF NOT EXISTS follow(
+        """CREATE TABLE IF NOT EXISTS follows(
             uri TEXT PRIMARY KEY,
             follower TEXT,
             followee TEXT
         )"""
     )
-    cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_uri ON follow (uri)')
+    cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_follows_uri ON follows (uri)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows (follower)')
     con.commit()
 
     last_update_time = time()
@@ -113,23 +115,25 @@ def process_events():
                 reply_root = record.reply.root.uri
                 reply_parent = record.reply.parent.uri
 
+            cid: str = created_post['cid']
+
             authors.append((
                 author,
                 False,
             ))
             created_post_infos.append((
                 created_post['uri'],
-                created_post['cid'],
+                cid[::-1],
                 reply_parent,
                 reply_root,
                 None,
-                record.created_at,
+                int(parser.isoparse(record.created_at).timestamp()),
                 author,
             ))
 
         if len(created_post_infos) > 0:
-            cur.executemany('INSERT OR IGNORE INTO person VALUES(?, ?)', authors)
-            cur.executemany('INSERT OR IGNORE INTO post VALUES(?, ?, ?, ?, ?, ?, ?)', created_post_infos)
+            cur.executemany('INSERT OR IGNORE INTO people VALUES(?, ?)', authors)
+            cur.executemany('INSERT OR IGNORE INTO posts VALUES(?, ?, ?, ?, ?, ?, ?)', created_post_infos)
             print(f'Inserted {len(created_post_infos)} posts into database.')
 
         deleted_post_infos = []
@@ -139,7 +143,7 @@ def process_events():
             ))
 
         if len(deleted_post_infos) > 0:
-            cur.executemany('DELETE FROM post WHERE uri = ?', deleted_post_infos)
+            cur.executemany('DELETE FROM posts WHERE uri = ?', deleted_post_infos)
             print(f'Deleted {len(deleted_post_infos)} posts from database.')
 
         # Reposts
@@ -153,23 +157,25 @@ def process_events():
             if not hasattr(record, 'subject') or record.subject is None:
                 continue
 
+            cid: str = created_post['cid']
+
             authors.append((
                 author,
                 False,
             ))
             created_repost_infos.append((
                 created_repost['uri'],
-                created_repost['cid'],
+                cid[::-1],
                 None,
                 None,
                 record.subject.uri,
-                record.created_at,
+                int(parser.isoparse(record.created_at).timestamp()),
                 author,
             ))
 
         if len(created_repost_infos) > 0:
-            cur.executemany('INSERT OR IGNORE INTO person VALUES(?, ?)', authors)
-            cur.executemany('INSERT OR IGNORE INTO post VALUES(?, ?, ?, ?, ?, ?, ?)', created_repost_infos)
+            cur.executemany('INSERT OR IGNORE INTO people VALUES(?, ?)', authors)
+            cur.executemany('INSERT OR IGNORE INTO posts VALUES(?, ?, ?, ?, ?, ?, ?)', created_repost_infos)
             print(f'Inserted {len(created_repost_infos)} reposts into database.')
 
         deleted_repost_infos = []
@@ -179,7 +185,7 @@ def process_events():
             ))
 
         if len(deleted_repost_infos) > 0:
-            cur.executemany('DELETE FROM post WHERE uri = ?', deleted_repost_infos)
+            cur.executemany('DELETE FROM posts WHERE uri = ?', deleted_repost_infos)
             print(f'Deleted {len(deleted_repost_infos)} reposts from database.')
 
         # Follows
@@ -200,8 +206,8 @@ def process_events():
             ))
 
         if len(created_follow_infos) > 0:
-            cur.executemany('INSERT OR IGNORE INTO person VALUES(?, ?)', authors)
-            cur.executemany('INSERT OR IGNORE INTO follow VALUES(?, ?, ?)', created_follow_infos)
+            cur.executemany('INSERT OR IGNORE INTO people VALUES(?, ?)', authors)
+            cur.executemany('INSERT OR IGNORE INTO follows VALUES(?, ?, ?)', created_follow_infos)
             print(f'Inserted {len(created_follow_infos)} follows into database.')
 
         deleted_follow_infos = []
@@ -211,13 +217,14 @@ def process_events():
             ))
 
         if len(deleted_follow_infos) > 0:
-            cur.executemany('DELETE FROM follow WHERE uri = ?', deleted_follow_infos)
+            cur.executemany('DELETE FROM follows WHERE uri = ?', deleted_follow_infos)
             print(f'Deleted {len(deleted_follow_infos)} follows from database.')
 
         global last_purge_time
         time_since_last_purge = time() - last_purge_time
         if time_since_last_purge >= 30.0 * 60.0:
-            cur.execute("DELETE FROM post WHERE created_at <= datetime('now', '-12 hours')")
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=12)
+            cur.execute(f"DELETE FROM posts WHERE created_at <= {int(cutoff_time.timestamp())}")
             print('Purged old posts.')
             last_purge_time = time()
 

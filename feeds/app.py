@@ -1,7 +1,9 @@
 from atproto import Client, DidInMemoryCache, IdResolver, models, verify_jwt
 from atproto.exceptions import TokenInvalidSignatureError
+import bisect
 import fcntl
 from flask import Flask, jsonify, request
+import random
 import sqlite3
 from time import time_ns
 from waitress import serve
@@ -17,8 +19,15 @@ URI = 'at://did:plc:str7htuk7asez6oi2pxgknci/app.bsky.feed.generator/chaos'
 CACHE = DidInMemoryCache()
 ID_RESOLVER = IdResolver(cache=CACHE)
 
+user_last_seeds: dict[str, int] = {}
+
 class AuthorizationError(Exception):
     ...
+
+def hashcode(text: str) -> int:
+    l = list(text)
+    random.shuffle(l)
+    return hash(''.join(l))
 
 app = Flask(__name__)
 
@@ -57,14 +66,14 @@ def get_feed_skeleton():
     # Get requester DID
     authorization = request.headers.get('Authorization')
     if not authorization:
-        raise AuthorizationError('Authorization header is missing')
+        return 'Authorization header is missing', 401
     if not authorization.startswith('Bearer '):
-        raise AuthorizationError('Invalid authorization header')
+        return 'Invalid authorization header', 401
     jwt = authorization[len('Bearer '):].strip()
     try:
         requester_did = verify_jwt(jwt, ID_RESOLVER.did.resolve_atproto_key).iss
     except TokenInvalidSignatureError as ex:
-        raise AuthorizationError('Invalid signature') from ex
+        return f'Invalid signature: {ex}', 401
 
     try:
         cursor = request.args.get('cursor', default=None, type=str)
@@ -74,12 +83,12 @@ def get_feed_skeleton():
     limit = request.args.get('limit', default=20, type=int)
     print(f'Feed refreshed by {requester_did} - limit = {limit}:')
 
-    con = sqlite3.connect('firehose.db', detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
-    cur = con.cursor()
+    db_con = sqlite3.connect('firehose.db', detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+    db_cursor = db_con.cursor()
 
     # If necessary, populate the requester's following list
     # (for any people they followed before this feed service started running)
-    res = con.execute(f"SELECT follows_primed FROM person WHERE did='{requester_did}'")
+    res = db_con.execute(f"SELECT follows_primed FROM people WHERE did='{requester_did}'")
     follows_primed_tuple = res.fetchone()
     if follows_primed_tuple is None or follows_primed_tuple[0] == 0:
         print(f'Priming follows for {requester_did}.')
@@ -87,7 +96,6 @@ def get_feed_skeleton():
         start_time = time_ns()
 
         client = Client()
-        client.login(HANDLE, PASSWORD)
         follows = client.com.atproto.repo.list_records(models.ComAtprotoRepoListRecords.Params(
             repo=requester_did,
             collection=models.ids.AppBskyGraphFollow,
@@ -126,17 +134,17 @@ def get_feed_skeleton():
 
         # Add the requester to the person table, if they're not there already
         if follows_primed_tuple is None:
-            cur.execute(f'INSERT OR IGNORE INTO person ({requester_did}, {False})')
+            db_cursor.execute(f"INSERT OR IGNORE INTO people (did, follows_primed) VALUES ('{requester_did}', {False})")
 
         # Add all authors and follows
         if len(follow_infos) > 0:
-            cur.executemany('INSERT OR IGNORE INTO person VALUES(?, ?)', authors)
-            cur.executemany('INSERT OR IGNORE INTO follow VALUES(?, ?, ?)', follow_infos)
+            db_cursor.executemany('INSERT OR IGNORE INTO people VALUES(?, ?)', authors)
+            db_cursor.executemany('INSERT OR IGNORE INTO follows VALUES(?, ?, ?)', follow_infos)
             print(f'Inserted {len(follow_infos)} follows into database.')
-        cur.execute(f"UPDATE person SET follows_primed = {True} WHERE did = '{requester_did}'")
+        db_cursor.execute(f"UPDATE people SET follows_primed = {True} WHERE did = '{requester_did}'")
 
         print('Committing queries')
-        con.commit()
+        db_con.commit()
         print('Unlocking db')
         fcntl.flock(lock_file, fcntl.LOCK_UN)
         lock_file.close()
@@ -146,7 +154,68 @@ def get_feed_skeleton():
 
         print(f'Time to update follows: {elapsed_time_ms} ms.)')
 
-    body = { 'feed': [{'post': 'at://did:plc:da4qrww7zq3flsr2zialldef/app.bsky.feed.post/3l3w3xxig4o2h'}] }
+    if cursor is not None:
+        try:
+            rand_id_str, did = cursor.split('::')
+            rand_id = int(rand_id_str)
+        except ValueError as ex:
+            return f'Malformed cursor "{cursor}"', 400
+        if did != requester_did:
+            return f'JWT and cursor DID do not match', 400
+    limit = limit if limit < 600 else 600
+
+    start_time = time_ns()
+    res = db_con.execute(f"""
+                        SELECT uri, repost_uri, cid_rev
+                        FROM posts
+                        WHERE reply_parent is NULL AND author IN
+                            (SELECT followee FROM follows WHERE follower = '{requester_did}')
+                        ORDER BY cid_rev
+                        """)
+    posts = res.fetchall()
+    print(f'Num posts: {len(posts)}')
+    end_time = time_ns()
+    elapsed_time_ms = (end_time - start_time) // 1_000_000
+    print(f'Query time: {elapsed_time_ms} ms.')
+
+    # Get the sorting seed
+    seed = user_last_seeds.get(requester_did, 0)
+
+    # An undefined cursor and larger limit indicates a full refresh, so we'll update the seed to reorder everything
+    if cursor is None and limit > 20:
+        seed += 1
+        user_last_seeds[requester_did] = seed
+
+    random.seed(seed)
+
+    start_time = time_ns()
+    feed = []
+    for uri, repost_uri, cid_rev in posts:
+        post: dict
+        if repost_uri is not None and repost_uri != '':
+            post = {
+                'post': repost_uri,
+                'reason': {
+                    '$type': 'app.bsky.feed.defs#skeletonReasonRepost',
+                    'repost': uri,
+                },
+                'rand_id': hashcode(cid_rev),
+            }
+        else:
+            post = {
+                'post': uri,
+                'rand_id': hashcode(cid_rev),
+            }
+        
+        feed.append(post)
+    
+    feed.sort(key=lambda p: p['rand_id'])
+
+    end_time = time_ns()
+    elapsed_time_ms = (end_time - start_time) // 1_000_000
+    print(f'Sort time: {elapsed_time_ms} ms.')
+
+    body = { 'feed': feed }
     
     return jsonify(body)
 
