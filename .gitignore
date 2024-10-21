@@ -184,3 +184,5 @@ cython_debug/
 
 firehose.db
 firehose.db.lock
+
+firehose.db-journal
