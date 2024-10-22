@@ -2,7 +2,9 @@ handle: ''
 password: ''
 hostname: ''
 feeds:
-- record_name: 'chaos'
-- uri: ''
-- display_name: 'Random From Follows'
-- description: 'Random collection of posts from your follows, from the last 12 hours.'
+  random_from_follows:
+    record_name: 'chaos'
+    uri: ''
+    display_name: 'Random From Follows'
+    description: 'Random collection of posts from people you follow, from the last 12 hours.'
+    avatar_path: './dice.png'
