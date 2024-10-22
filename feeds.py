@@ -10,7 +10,6 @@ from waitress import serve
 
 SERVICE_DID = f'did:web:{config.HOSTNAME}'
 URI = config.FEEDS['random_from_follows']['uri']
-# URI = 'at://did:plc:da4qrww7zq3flsr2zialldef/app.bsky.feed.generator/chaos'
 
 CACHE = DidInMemoryCache()
 ID_RESOLVER = IdResolver(cache=CACHE)
@@ -77,7 +76,7 @@ def get_feed_skeleton():
         return 'Malformed cursor', 400
 
     limit = request.args.get('limit', default=20, type=int)
-    print(f'Feed refreshed by {requester_did} - limit = {limit}:')
+    print(f'Feed refreshed by {requester_did} - cursor = {cursor} - limit = {limit}:')
 
     db_con = sqlite3.connect('firehose.db', detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
     db_cursor = db_con.cursor()
@@ -150,10 +149,11 @@ def get_feed_skeleton():
 
         print(f'Time to update follows: {elapsed_time_ms} ms.)')
 
+    cursor_rand_id: int = None
     if cursor is not None:
         try:
             rand_id_str, did = cursor.split('::')
-            rand_id = int(rand_id_str)
+            cursor_rand_id = int(rand_id_str)
         except ValueError as ex:
             return f'Malformed cursor "{cursor}"', 400
         if did != requester_did:
@@ -207,11 +207,26 @@ def get_feed_skeleton():
     
     feed.sort(key=lambda p: p['rand_id'])
 
+    # Find position based on rand_id from cursor
+    position = 0
+    if cursor_rand_id is not None:
+        for post in feed:
+            if post['rand_id'] > cursor_rand_id:
+                break
+            position += 1
+
+    # Slice feed from position to limit
+    feed_slice = feed[position:position+limit]
+    if len(feed_slice) > 0:
+        cursor_rand_id = feed_slice[-1]['rand_id']
+
+    cursor = f'{cursor_rand_id}::{requester_did}'
+
     end_time = time_ns()
     elapsed_time_ms = (end_time - start_time) // 1_000_000
     print(f'Sort time: {elapsed_time_ms} ms.')
 
-    body = { 'feed': feed }
+    body = { 'cursor': cursor, 'feed': feed_slice }
     
     return jsonify(body)
 
