@@ -67,6 +67,7 @@ def process_events():
             author TEXT
         )""")
     cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_uri ON posts (uri)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_posts_author ON posts (author)')
     cur.execute(
         """CREATE TABLE IF NOT EXISTS follows(
             uri TEXT PRIMARY KEY,
@@ -310,10 +311,13 @@ def main():
             curr_num_records = 0
             last_cycle_time = curr_time
 
+    def on_error_handler(ex: BaseException) -> None:
+        print(f'Firehose error! {ex}')
+
     t = Thread(target = process_events)
     t.start()
 
-    client.start(on_message_handler)
+    client.start(on_message_handler, on_error_handler)
 
 if __name__ == "__main__":
     main()
