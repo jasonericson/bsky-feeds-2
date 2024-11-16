@@ -90,6 +90,8 @@ def process_events():
 
         start_time = time_ns()
 
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=12)
+
         global curr_record_collection_idx
         last_record_collection_idx = curr_record_collection_idx
         with cycle_mutex:
@@ -108,6 +110,11 @@ def process_events():
         for created_post in post_collection.created:
             author = created_post['author']
             record = created_post['record']
+
+            # Posts can be added to the stream but given an old 'created_at' date - if it's too old, we won't add it
+            created_at_dt = parser.isoparse(record.created_at)
+            if created_at_dt < cutoff_time:
+                continue
 
             reply_root = reply_parent = None
             if hasattr(record, 'reply') and record.reply:
@@ -128,7 +135,7 @@ def process_events():
                 reply_parent,
                 reply_root,
                 None,
-                int(parser.isoparse(record.created_at).timestamp()),
+                int(created_at_dt.timestamp()),
                 author,
             ))
 
@@ -224,7 +231,6 @@ def process_events():
         global last_purge_time
         time_since_last_purge = time() - last_purge_time
         if time_since_last_purge >= 30.0 * 60.0:
-            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=12)
             cur.execute(f"DELETE FROM posts WHERE created_at <= {int(cutoff_time.timestamp())}")
             print('Purged old posts.')
             last_purge_time = time()
