@@ -77,6 +77,7 @@ def process_events():
     )
     cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_follows_uri ON follows (uri)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows (follower)')
+    cur.execute('PRAGMA secure_delete = 0;')
     con.commit()
 
     last_update_time = time()
@@ -319,6 +320,7 @@ def main():
 
     def on_error_handler(ex: BaseException) -> None:
         print(f'Firehose error! {ex}')
+        exit(1)
 
     t = Thread(target = process_events)
     t.start()
