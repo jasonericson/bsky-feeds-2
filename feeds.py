@@ -1,10 +1,10 @@
 from atproto import Client, DidInMemoryCache, IdResolver, models, verify_jwt
 from atproto.exceptions import TokenInvalidSignatureError
 import config
-import fcntl
 from flask import Flask, jsonify, request
 import random
-import sqlite3
+import psycopg2
+from psycopg2.extras import execute_batch
 from time import time_ns
 from waitress import serve
 
@@ -78,14 +78,17 @@ def get_feed_skeleton():
     limit = request.args.get('limit', default=20, type=int)
     print(f'Feed refreshed by {requester_did} - cursor = {cursor} - limit = {limit}:')
 
-    db_con = sqlite3.connect('firehose.db', detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+    db_con = psycopg2.connect(database='bluesky',
+                           host='localhost',
+                           user='postgres',
+                           password=config.DB_PASSWORD,
+                           port=5432)
     db_cursor = db_con.cursor()
 
     # If necessary, populate the requester's following list
     # (for any people they followed before this feed service started running)
-    res = db_con.execute(f"SELECT follows_primed FROM people WHERE did='{requester_did}'")
-    follows_primed_tuple = res.fetchone()
-    if follows_primed_tuple is None or follows_primed_tuple[0] == 0:
+    db_cursor.execute('SELECT * FROM follows_primed WHERE did = %s', (requester_did, ))
+    if db_cursor.rowcount <= 0:
         print(f'Priming follows for {requester_did}.')
 
         start_time = time_ns()
@@ -122,27 +125,16 @@ def get_feed_skeleton():
             if follows_cursor == None:
                 break
 
-        # Acquire lock file for writing to db
-        lock_file = open('./firehose.db.lock', 'w+')
-        print('Acquiring db lock')
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-
-        # Add the requester to the person table, if they're not there already
-        if follows_primed_tuple is None:
-            db_cursor.execute(f"INSERT OR IGNORE INTO people (did, follows_primed) VALUES ('{requester_did}', {False})")
-
-        # Add all authors and follows
+        # Add all follows
         if len(follow_infos) > 0:
-            db_cursor.executemany('INSERT OR IGNORE INTO people VALUES(?, ?)', authors)
-            db_cursor.executemany('INSERT OR IGNORE INTO follows VALUES(?, ?, ?)', follow_infos)
+            execute_batch(db_cursor, 'INSERT INTO follows VALUES(%s, %s, %s) ON CONFLICT DO NOTHING', follow_infos)
             print(f'Inserted {len(follow_infos)} follows into database.')
-        db_cursor.execute(f"UPDATE people SET follows_primed = {True} WHERE did = '{requester_did}'")
+
+        # Add the requester to the follows_primed table
+        db_cursor.execute('INSERT INTO follows_primed (did) VALUES (%s)', (requester_did, ))
 
         print('Committing queries')
         db_con.commit()
-        print('Unlocking db')
-        fcntl.flock(lock_file, fcntl.LOCK_UN)
-        lock_file.close()
 
         end_time = time_ns()
         elapsed_time_ms = (end_time - start_time) // 1_000_000
@@ -161,14 +153,15 @@ def get_feed_skeleton():
     limit = limit if limit < 600 else 600
 
     start_time = time_ns()
-    res = db_con.execute(f"""
+    # Collect posts
+    db_cursor.execute(f"""
                         SELECT uri, repost_uri, cid_rev
                         FROM posts
-                        WHERE reply_parent is NULL AND author IN
+                        WHERE author IN
                             (SELECT followee FROM follows WHERE follower = '{requester_did}')
                         ORDER BY cid_rev
                         """)
-    posts = res.fetchall()
+    posts = db_cursor.fetchall()
     print(f'Num posts: {len(posts)}')
     end_time = time_ns()
     elapsed_time_ms = (end_time - start_time) // 1_000_000

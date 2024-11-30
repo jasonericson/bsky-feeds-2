@@ -1,11 +1,11 @@
 from atproto import AtUri, CAR, firehose_models, FirehoseSubscribeReposClient, models, parse_subscribe_repos_message
+import config
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from dateutil import parser
 from enum import auto, Enum
-import fcntl
-import os
-import sqlite3
+import psycopg2
+from psycopg2.extras import execute_batch
 from threading import Lock, Thread
 from time import sleep, time, time_ns
 from types import ModuleType
@@ -47,26 +47,29 @@ last_purge_time = 0
 curr_num_records = 0
 
 def process_events():
-    con = sqlite3.connect('firehose.db', detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+    con = psycopg2.connect(database='bluesky',
+                           host='localhost',
+                           user='postgres',
+                           password=config.DB_PASSWORD,
+                           port=5432)
     cur = con.cursor()
 
     cur.execute(
-        """CREATE TABLE IF NOT EXISTS people(
-            did TEXT PRIMARY KEY,
-            follows_primed BOOLEAN
+        """CREATE TABLE IF NOT EXISTS follows_primed(
+            did TEXT PRIMARY KEY
         )""")
-    cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_people_did ON people (did)')
+    cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_people_did ON follows_primed (did)')
     cur.execute(
         """CREATE TABLE IF NOT EXISTS posts(
-            uri TEXT PRIMARY KEY,
+            uri TEXT,
             cid_rev TEXT,
-            reply_parent TEXT,
-            reply_root TEXT,
             repost_uri TEXT,
-            created_at INTEGER,
+            created_at TIMESTAMPTZ NOT NULL,
             author TEXT
-        )""")
-    cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_uri ON posts (uri)')
+        ) PARTITION BY RANGE(created_at)""")
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_posts_uri ON posts (uri)')
+    cur.execute('CREATE INDEX IF NOT EXISTS idx_posts_created_at ON posts (created_at)')
+
     cur.execute('CREATE INDEX IF NOT EXISTS idx_posts_author ON posts (author)')
     cur.execute(
         """CREATE TABLE IF NOT EXISTS follows(
@@ -77,7 +80,6 @@ def process_events():
     )
     cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_follows_uri ON follows (uri)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows (follower)')
-    cur.execute('PRAGMA secure_delete = 0;')
     con.commit()
 
     last_update_time = time()
@@ -91,110 +93,118 @@ def process_events():
 
         start_time = time_ns()
 
-        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=12)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=13)
 
         global curr_record_collection_idx
         last_record_collection_idx = curr_record_collection_idx
         with cycle_mutex:
             curr_record_collection_idx = (last_record_collection_idx + 1) % num_record_collections
         record_collections = record_collections_cycle[last_record_collection_idx]
-        
-        # Acquire lock on db
-        lock_file = open('./firehose.db.lock', 'w+')
-        print('Acquiring db lock')
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
 
         # Posts
         post_collection = record_collections[RecordType.Post.value]
-        authors = []
+        times_to_create: set[datetime] = set()
         created_post_infos = []
         for created_post in post_collection.created:
             author = created_post['author']
             record = created_post['record']
 
-            # Posts can be added to the stream but given an old 'created_at' date - if it's too old, we won't add it
-            created_at_dt = parser.isoparse(record.created_at)
-            if created_at_dt < cutoff_time:
+            # Posts can be given custom created_at dates - if it's too old, or in the future, we ignore it
+            created_at_dt = parser.isoparse(record.created_at).astimezone(timezone.utc)
+            if created_at_dt < cutoff_time or created_at_dt > datetime.now(timezone.utc) + timedelta(minutes=5):
                 continue
 
-            reply_root = reply_parent = None
+            # Ignoring replies
             if hasattr(record, 'reply') and record.reply:
-                if record.reply.root is None or record.reply.parent is None:
-                    continue
-                reply_root = record.reply.root.uri
-                reply_parent = record.reply.parent.uri
+                continue
+
+            # Log each hour block that a post has been created in, for table partitioning
+            created_at_hour = datetime(year=created_at_dt.year, month=created_at_dt.month, day=created_at_dt.day, hour=created_at_dt.hour, tzinfo=created_at_dt.tzinfo)
+            times_to_create.add(created_at_hour)
 
             cid: str = created_post['cid']
-
-            authors.append((
-                author,
-                False,
-            ))
+            
             created_post_infos.append((
                 created_post['uri'],
-                cid[::-1],
-                reply_parent,
-                reply_root,
+                cid[::-1], # Reversed, for more random sorting
                 None,
-                int(created_at_dt.timestamp()),
+                created_at_dt,
                 author,
             ))
 
+        # Add partitions to the table for each hour (if they don't exist)
+        for table_time in times_to_create:
+            cur.execute(f"CREATE TABLE IF NOT EXISTS posts_{table_time.strftime('y%Ym%md%dh%H')} PARTITION OF posts\
+                            FOR VALUES FROM (%s) TO (%s)", (table_time, table_time + timedelta(hours=1)))
+
+        # Add posts to db
         if len(created_post_infos) > 0:
-            cur.executemany('INSERT OR IGNORE INTO people VALUES(?, ?)', authors)
-            cur.executemany('INSERT OR IGNORE INTO posts VALUES(?, ?, ?, ?, ?, ?, ?)', created_post_infos)
+            execute_batch(cur, 'INSERT INTO posts VALUES(%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING', created_post_infos)
             print(f'Inserted {len(created_post_infos)} posts into database.')
 
+        # Collect deleted posts
         deleted_post_infos = []
         for deleted_post in post_collection.deleted:
             deleted_post_infos.append((
                 deleted_post['uri'],
             ))
 
+        # Delete posts from db
         if len(deleted_post_infos) > 0:
-            cur.executemany('DELETE FROM posts WHERE uri = ?', deleted_post_infos)
+            execute_batch(cur, 'DELETE FROM posts WHERE uri = %s', deleted_post_infos)
             print(f'Deleted {len(deleted_post_infos)} posts from database.')
 
         # Reposts
         repost_collection = record_collections[RecordType.Repost.value]
-        authors = []
+        times_to_create: set[datetime] = set()
         created_repost_infos = []
         for created_repost in repost_collection.created:
             record = created_repost['record']
             author = created_repost['author']
+
+            # Posts can be given custom created_at dates - if it's too old, or in the future, we ignore it
+            created_at_dt = parser.isoparse(record.created_at).astimezone(timezone.utc)
+            if created_at_dt < cutoff_time or created_at_dt > datetime.now(timezone.utc) + timedelta(minutes=5):
+                continue
             
+            # Ignore empty reposts
             if not hasattr(record, 'subject') or record.subject is None:
                 continue
 
+            # Log each hour block that a post has been created in, for table partitioning
+            created_at_hour = datetime(year=created_at_dt.year, month=created_at_dt.month, day=created_at_dt.day, hour=created_at_dt.hour, tzinfo=created_at_dt.tzinfo)
+            times_to_create.add(created_at_hour)
+
             cid: str = created_post['cid']
 
-            authors.append((
-                author,
-                False,
-            ))
             created_repost_infos.append((
                 created_repost['uri'],
-                cid[::-1],
-                None,
-                None,
+                cid[::-1], # Reversed for more random sorting
                 record.subject.uri,
-                int(parser.isoparse(record.created_at).timestamp()),
+                created_at_dt,
                 author,
             ))
 
+        # Add partitions to the table for each hour (if they don't exist)
+        for table_time in times_to_create:
+            cur.execute(f"CREATE TABLE IF NOT EXISTS posts_{table_time.strftime('y%Ym%md%dh%H')} PARTITION OF posts\
+                            FOR VALUES FROM (%s) TO (%s)", (table_time, table_time + timedelta(hours=1)))
+
+        # Add reposts to db
         if len(created_repost_infos) > 0:
-            cur.executemany('INSERT OR IGNORE INTO people VALUES(?, ?)', authors)
-            cur.executemany('INSERT OR IGNORE INTO posts VALUES(?, ?, ?, ?, ?, ?, ?)', created_repost_infos)
+            execute_batch(cur, 'INSERT INTO posts VALUES(%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING', created_repost_infos)
             print(f'Inserted {len(created_repost_infos)} reposts into database.')
 
+        # Collect deleted reposts
         deleted_repost_infos = []
         for deleted_repost in repost_collection.deleted:
             deleted_repost_infos.append((
                 deleted_repost['uri'],
             ))
 
+        # Delete reposts from db
         if len(deleted_repost_infos) > 0:
-            cur.executemany('DELETE FROM posts WHERE uri = ?', deleted_repost_infos)
+            execute_batch(cur, 'DELETE FROM posts WHERE uri = %s', deleted_repost_infos)
             print(f'Deleted {len(deleted_repost_infos)} reposts from database.')
 
         # Follows
@@ -215,8 +225,7 @@ def process_events():
             ))
 
         if len(created_follow_infos) > 0:
-            cur.executemany('INSERT OR IGNORE INTO people VALUES(?, ?)', authors)
-            cur.executemany('INSERT OR IGNORE INTO follows VALUES(?, ?, ?)', created_follow_infos)
+            execute_batch(cur, 'INSERT INTO follows VALUES(%s, %s, %s) ON CONFLICT DO NOTHING', created_follow_infos)
             print(f'Inserted {len(created_follow_infos)} follows into database.')
 
         deleted_follow_infos = []
@@ -226,21 +235,39 @@ def process_events():
             ))
 
         if len(deleted_follow_infos) > 0:
-            cur.executemany('DELETE FROM follows WHERE uri = ?', deleted_follow_infos)
+            execute_batch(cur, 'DELETE FROM follows WHERE uri = %s', deleted_follow_infos)
             print(f'Deleted {len(deleted_follow_infos)} follows from database.')
 
         global last_purge_time
         time_since_last_purge = time() - last_purge_time
-        if time_since_last_purge >= 30.0 * 60.0:
-            cur.execute(f"DELETE FROM posts WHERE created_at <= {int(cutoff_time.timestamp())}")
+        if time_since_last_purge >= 60.0 * 60.0:
+            # Query to collect all partitions of 'posts' table
+            cur.execute(
+                """ SELECT child.relname AS name
+                    FROM pg_inherits
+                        JOIN pg_class parent ON pg_inherits.inhparent = parent.oid
+                        JOIN pg_class child ON pg_inherits.inhrelid = child.oid
+                        JOIN pg_namespace nmsp_parent ON nmsp_parent.oid = parent.relnamespace
+                        JOIN pg_namespace nmsp_child ON nmsp_child.oid = child.relnamespace
+                    WHERE parent.relname = 'posts'
+                    ORDER BY name ASC
+                """)
+            for row in cur.fetchall():
+                # Parse the datetime from the table name - if it's older than the threshhold, drop it
+                table_name = row[0]
+                table_time_str = f'{table_name}+0000'
+                table_time = datetime.strptime(table_time_str, 'posts_y%Ym%md%dh%H%z')
+                if table_time < cutoff_time:
+                    print(f'Dropping partition {table_name}')
+                    cur.execute(f"DROP TABLE {table_name}")
+                else:
+                    print(f'Leaving partition {table_name} in the db')
+
             print('Purged old posts.')
             last_purge_time = time()
 
         print('Committing queries')
         con.commit()
-        print('Unlocking db')
-        fcntl.flock(lock_file, fcntl.LOCK_UN)
-        lock_file.close()
 
         # print(f'Number of events for idx {last_record_collection_idx}')
         # total_events = 0
