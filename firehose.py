@@ -1,4 +1,5 @@
 from atproto import AtUri, CAR, firehose_models, FirehoseSubscribeReposClient, models, parse_subscribe_repos_message
+from queue import SimpleQueue
 import config
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -6,7 +7,7 @@ from dateutil import parser
 from enum import auto, Enum
 import psycopg2
 from psycopg2.extras import execute_batch
-from threading import Lock, Thread
+from threading import Thread
 from time import sleep, time, time_ns
 from types import ModuleType
 
@@ -29,22 +30,24 @@ _INTERESTED_RECORDS = [
     RecordInfo(RecordType.Repost, models.AppBskyFeedRepost, models.ids.AppBskyFeedRepost),
 ]
 
+class ActionType:
+    Created = 0
+    Deleted = 1
+
+@dataclass
+class Record:
+    record_type: RecordType
+    action_type: ActionType
+    record_info: dict
+
 @dataclass
 class RecordCollection:
     created: list = field(default_factory=lambda: [])
     deleted: list = field(default_factory=lambda: [])
 
-num_record_collections = 3
-curr_record_collection_idx = 0
-record_collections_cycle: list[list[RecordCollection]] = []
-for i in range(num_record_collections):
-    record_collections = [RecordCollection() for _ in RecordType]
-    record_collections_cycle.append(record_collections)
-cycle_mutex = Lock()
+record_queue = SimpleQueue()
 
-last_cycle_time = time()
 last_purge_time = 0
-curr_num_records = 0
 
 def process_events():
     con = psycopg2.connect(database='bluesky',
@@ -95,11 +98,18 @@ def process_events():
 
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=13)
 
-        global curr_record_collection_idx
-        last_record_collection_idx = curr_record_collection_idx
-        with cycle_mutex:
-            curr_record_collection_idx = (last_record_collection_idx + 1) % num_record_collections
-        record_collections = record_collections_cycle[last_record_collection_idx]
+        record_collections: list[RecordCollection] = [RecordCollection() for _ in RecordType]
+        global record_queue
+        while not record_queue.empty():
+            record: Record = record_queue.get_nowait()
+            if record.action_type == ActionType.Created:
+                record_collections[record.record_type.value].created.append(record.record_info)
+            else:
+                record_collections[record.record_type.value].deleted.append(record.record_info)
+
+        queue_finished_time = time_ns()
+        elapsed_time_ms = (queue_finished_time - start_time) / 1_000_000
+        print(f'Time to pull from queue: {elapsed_time_ms} ms.')
 
         # Posts
         post_collection = record_collections[RecordType.Post.value]
@@ -269,17 +279,6 @@ def process_events():
         print('Committing queries')
         con.commit()
 
-        # print(f'Number of events for idx {last_record_collection_idx}')
-        # total_events = 0
-        for idx, record_collection in enumerate(record_collections_cycle[last_record_collection_idx]):
-            # print(f'{RecordType(idx)} Created: {len(record_collection.created)}')
-            # total_events += len(record_collection.created)
-            # print(f'{RecordType(idx)} Deleted: {len(record_collection.deleted)}')
-            # total_events += len(record_collection.deleted)
-            record_collection.created.clear()
-            record_collection.deleted.clear()
-        # print(f'TOTAL: {total_events}')
-
         end_time = time_ns()
         elapsed_time_ms = (end_time - start_time) // 1_000_000
         print(f'Time to update db: {elapsed_time_ms} ms. ({elapsed_time_ms / (db_update_interval * 1000) * 100:.3}% of {db_update_interval} seconds.)')
@@ -287,8 +286,6 @@ def process_events():
 def main():
     params = models.ComAtprotoSyncSubscribeRepos.Params()
     client = FirehoseSubscribeReposClient(params)
-
-    num_records_history: list[int] = []
 
     def on_message_handler(message: firehose_models.MessageFrame) -> None:
         commit = parse_subscribe_repos_message(message)
@@ -299,8 +296,7 @@ def main():
             return
 
         car = CAR.from_bytes(commit.blocks)
-        global curr_num_records
-        curr_num_records += len(commit.ops)
+        global record_queue
         for op in commit.ops:
             if op.action == 'update':
                 continue
@@ -319,31 +315,13 @@ def main():
                 for record_info in _INTERESTED_RECORDS:
                     if uri.collection == record_info.record_nsid and models.is_record_type(record, record_info.record_module):
                         create_info = {'record': record, 'uri': str(uri), 'cid': str(op.cid), 'author': commit.repo}
-                        with cycle_mutex:
-                            record_collections_cycle[curr_record_collection_idx][record_info.record_type.value].created.append(create_info)
-                        break
+                        record_queue.put(Record(record_info.record_type, ActionType.Created, create_info))
 
             if op.action == 'delete':
                 for record_info in _INTERESTED_RECORDS:
                     if uri.collection == record_info.record_nsid:
                         delete_info = {'uri': str(uri)}
-                        with cycle_mutex:
-                            record_collections_cycle[curr_record_collection_idx][record_info.record_type.value].deleted.append(delete_info)
-                        break
-
-        curr_time = time()
-        global last_cycle_time
-        if curr_time - last_cycle_time >= 1.0:
-            num_records_history.append(curr_num_records)
-            while len(num_records_history) > 20:
-                num_records_history.pop()
-            avg = 0
-            for num_records in num_records_history:
-                avg += num_records
-            avg /= len(num_records_history)
-
-            curr_num_records = 0
-            last_cycle_time = curr_time
+                        record_queue.put(Record(record_info.record_type, ActionType.Deleted, delete_info))
 
     def on_error_handler(ex: BaseException) -> None:
         print(f'Firehose error! {ex}')
