@@ -2,7 +2,7 @@ from atproto import Client, DidInMemoryCache, IdResolver, models, verify_jwt
 from atproto.exceptions import TokenInvalidSignatureError
 import config
 from flask import Flask, jsonify, request
-import random
+from random import Random
 import psycopg2
 from psycopg2.extras import execute_batch
 from time import time_ns
@@ -19,9 +19,9 @@ user_last_seeds: dict[str, int] = {}
 class AuthorizationError(Exception):
     ...
 
-def hashcode(text: str) -> int:
+def hashcode(text: str, r: Random) -> int:
     l = list(text)
-    random.shuffle(l)
+    r.shuffle(l)
     return hash(''.join(l))
 
 app = Flask(__name__)
@@ -160,6 +160,7 @@ def get_feed_skeleton():
                         WHERE author IN
                             (SELECT followee FROM follows WHERE follower = '{requester_did}')
                         ORDER BY cid_rev
+			LIMIT 1000
                         """)
     posts = db_cursor.fetchall()
     print(f'Num posts: {len(posts)}')
@@ -175,7 +176,7 @@ def get_feed_skeleton():
         seed += 1
         user_last_seeds[requester_did] = seed
 
-    random.seed(seed)
+    r = Random(seed)
 
     start_time = time_ns()
     feed = []
@@ -188,12 +189,12 @@ def get_feed_skeleton():
                     '$type': 'app.bsky.feed.defs#skeletonReasonRepost',
                     'repost': uri,
                 },
-                'rand_id': hashcode(cid_rev),
+                'rand_id': hashcode(cid_rev, r),
             }
         else:
             post = {
                 'post': uri,
-                'rand_id': hashcode(cid_rev),
+                'rand_id': hashcode(cid_rev, r),
             }
         
         feed.append(post)
