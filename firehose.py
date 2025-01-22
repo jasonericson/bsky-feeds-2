@@ -87,6 +87,8 @@ def process_events():
 
     last_update_time = time()
     db_update_interval = 2.0
+    last_successful_update_time = time()
+    update_success_threshhold = 30.0
     while True:
         time_since_last_update = time() - last_update_time
         wait_time = db_update_interval - time_since_last_update
@@ -94,12 +96,21 @@ def process_events():
             sleep(wait_time)
         last_update_time = time()
 
+        time_since_last_successful_update = time() - last_successful_update_time
+        if time_since_last_successful_update >= update_success_threshhold:
+            print(f"Error: It's been {update_success_threshhold} seconds since the last successful firehose update. Restarting...")
+            exit(1)
+
         start_time = time_ns()
 
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=13)
+        now_time = datetime.now(timezone.utc) + timedelta(minutes=10) # padding "now" time in case firehose is out of sync with computer system time
 
         record_collections: list[RecordCollection] = [RecordCollection() for _ in RecordType]
         global record_queue
+        if record_queue.empty():
+            continue
+
         while not record_queue.empty():
             record: Record = record_queue.get_nowait()
             if record.action_type == ActionType.Created:
@@ -121,7 +132,7 @@ def process_events():
 
             # Posts can be given custom created_at dates - if it's too old, or in the future, we ignore it
             created_at_dt = parser.isoparse(record.created_at).astimezone(timezone.utc)
-            if created_at_dt < cutoff_time or created_at_dt > datetime.now(timezone.utc) + timedelta(minutes=5):
+            if created_at_dt < cutoff_time or created_at_dt > now_time:
                 continue
 
             # Ignoring replies
@@ -282,6 +293,8 @@ def process_events():
         end_time = time_ns()
         elapsed_time_ms = (end_time - start_time) // 1_000_000
         print(f'Time to update db: {elapsed_time_ms} ms. ({elapsed_time_ms / (db_update_interval * 1000) * 100:.3}% of {db_update_interval} seconds.)')
+
+        last_successful_update_time = time()
 
 def main():
     params = models.ComAtprotoSyncSubscribeRepos.Params()
