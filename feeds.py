@@ -87,7 +87,7 @@ def get_feed_skeleton():
 
     # If necessary, populate the requester's following list
     # (for any people they followed before this feed service started running)
-    db_cursor.execute('SELECT * FROM follows_primed WHERE did = %s', (requester_did, ))
+    db_cursor.execute('SELECT 1 FROM follows WHERE follower = %s', (requester_did, ))
     if db_cursor.rowcount <= 0:
         print(f'Priming follows for {requester_did}.')
 
@@ -127,11 +127,10 @@ def get_feed_skeleton():
 
         # Add all follows
         if len(follow_infos) > 0:
+            db_cursor.execute('ALTER TABLE follows DISABLE TRIGGER check_follows_primed_trigger')
             execute_batch(db_cursor, 'INSERT INTO follows VALUES(%s, %s, %s) ON CONFLICT DO NOTHING', follow_infos)
+            db_cursor.execute('ALTER TABLE follows ENABLE TRIGGER check_follows_primed_trigger')
             print(f'Inserted {len(follow_infos)} follows into database.')
-
-        # Add the requester to the follows_primed table
-        db_cursor.execute('INSERT INTO follows_primed (did) VALUES (%s)', (requester_did, ))
 
         print('Committing queries')
         db_con.commit()

@@ -58,11 +58,6 @@ def process_events():
     cur = con.cursor()
 
     cur.execute(
-        """CREATE TABLE IF NOT EXISTS follows_primed(
-            did TEXT PRIMARY KEY
-        )""")
-    cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_people_did ON follows_primed (did)')
-    cur.execute(
         """CREATE TABLE IF NOT EXISTS posts(
             uri TEXT,
             cid_rev TEXT,
@@ -83,6 +78,34 @@ def process_events():
     )
     cur.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_follows_uri ON follows (uri)')
     cur.execute('CREATE INDEX IF NOT EXISTS idx_follows_follower ON follows (follower)')
+
+    cur.execute(
+        """CREATE OR REPLACE FUNCTION check_follows_primed()
+            RETURNS TRIGGER
+            LANGUAGE PLPGSQL
+            AS
+            $$
+            BEGIN
+            IF (SELECT EXISTS(SELECT 1 FROM follows WHERE follower=NEW.follower)) THEN
+            RETURN NEW;
+            ELSE
+            RETURN OLD;
+            END IF;
+            END;
+            $$""")
+    cur.execute(
+        """DO
+            $$BEGIN
+            CREATE TRIGGER check_follows_primed_trigger
+            BEFORE INSERT
+            ON follows
+            FOR EACH ROW
+            EXECUTE PROCEDURE check_follows_primed();
+            EXCEPTION
+            WHEN duplicate_object THEN
+                NULL;
+            END;$$;
+        """)
     con.commit()
 
     last_update_time = time()
