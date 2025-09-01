@@ -94,7 +94,8 @@ def get_feed_skeleton():
 
         start_time = time_ns()
 
-        client = Client()
+        did_doc = ID_RESOLVER.did.resolve(requester_did)
+        client = Client(did_doc.get_pds_endpoint())
         follows = client.com.atproto.repo.list_records(models.ComAtprotoRepoListRecords.Params(
             repo=requester_did,
             collection=models.ids.AppBskyGraphFollow,
