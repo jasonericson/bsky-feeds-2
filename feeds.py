@@ -9,7 +9,6 @@ from time import time_ns
 from waitress import serve
 
 SERVICE_DID = f'did:web:{config.HOSTNAME}'
-URI = config.FEEDS['random_from_follows']['uri']
 
 CACHE = DidInMemoryCache()
 ID_RESOLVER = IdResolver(cache=CACHE)
@@ -50,13 +49,15 @@ def describe_feed_generator():
         'encoding': 'application/json',
         'body': {
             'did': SERVICE_DID,
-            'feeds': [{'uri': URI}]
+            'feeds': [{'uri': feed['uri']} for feed in config.FEEDS.values()],
         }
     })
 
 @app.route('/xrpc/app.bsky.feed.getFeedSkeleton', methods=['GET'])
 def get_feed_skeleton():
     feed = request.args.get('feed', default=None, type=str)
+    include_reposts = feed.endswith('chaos')
+    print(f'Include reposts: {include_reposts}')
 
     # Get requester DID
     authorization = request.headers.get('Authorization')
@@ -158,6 +159,7 @@ def get_feed_skeleton():
                         FROM posts
                         WHERE author IN
                             (SELECT followee FROM follows WHERE follower = '{requester_did}')
+                        {'AND repost_uri IS NULL' if not include_reposts else ''}
                         ORDER BY cid_rev
 			LIMIT 1000
                         """)
@@ -181,7 +183,7 @@ def get_feed_skeleton():
     feed = []
     for uri, repost_uri, cid_rev in posts:
         post: dict
-        if repost_uri is not None and repost_uri != '':
+        if include_reposts and repost_uri is not None and repost_uri != '':
             post = {
                 'post': repost_uri,
                 'reason': {

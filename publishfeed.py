@@ -1,7 +1,7 @@
 from atproto import Client, models
 import config
 
-feed_config = config.FEEDS['random_from_follows']
+feed_config = config.FEEDS['random_onlyposts']
 
 def main():
     client = Client()
