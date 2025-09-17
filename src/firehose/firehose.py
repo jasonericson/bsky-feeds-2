@@ -51,7 +51,7 @@ last_purge_time = 0
 
 def process_events():
     con = psycopg2.connect(database='bluesky',
-                           host='localhost',
+                           host='db',
                            user='postgres',
                            password=config.DB_PASSWORD,
                            port=5432)

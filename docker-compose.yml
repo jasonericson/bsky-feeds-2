@@ -1,0 +1,45 @@
+services:
+  feeds:
+    restart: always
+    build:
+      context: .
+      dockerfile: ./src/feeds/Dockerfile
+    depends_on:
+      - db
+    ports:
+      - "5000:5000"
+  firehose:
+    restart: always
+    build:
+      context: .
+      dockerfile: ./src/firehose/Dockerfile
+    depends_on:
+      - db
+  db:
+    image: postgres
+    restart: always
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: bluesky
+      POSTGRES_USER: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - 5432:5432
+  ngrok:
+    image: ngrok/ngrok:latest
+    env_file:
+      - .env
+    command:
+      - "http"
+      - "http://feeds:5000"
+      - "--url"
+      - ${NGROK_URL}
+    ports:
+      - "4040:4040"
+    depends_on:
+      - feeds
+
+volumes:
+  pgdata:

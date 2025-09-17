@@ -1,5 +1,5 @@
 atproto==0.0.62
 flask[async]
-python-dateutil
+psycopg2
 waitress
 pyyaml

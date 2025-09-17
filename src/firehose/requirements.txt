@@ -1,0 +1,4 @@
+atproto==0.0.62
+psycopg2
+python-dateutil
+pyyaml

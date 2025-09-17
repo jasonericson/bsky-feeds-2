@@ -80,7 +80,7 @@ def get_feed_skeleton():
     print(f'Feed refreshed by {requester_did} - cursor = {cursor} - limit = {limit}:')
 
     db_con = psycopg2.connect(database='bluesky',
-                           host='localhost',
+                           host='db',
                            user='postgres',
                            password=config.DB_PASSWORD,
                            port=5432)
