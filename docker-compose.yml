@@ -27,19 +27,19 @@ services:
       - pgdata:/var/lib/postgresql/data
     ports:
       - 5432:5432
-  ngrok:
-    image: ngrok/ngrok:latest
-    env_file:
-      - .env
-    command:
-      - "http"
-      - "http://feeds:5000"
-      - "--url"
-      - ${NGROK_URL}
-    ports:
-      - "4040:4040"
-    depends_on:
-      - feeds
+  # ngrok:
+  #   image: ngrok/ngrok:latest
+  #   env_file:
+  #     - .env
+  #   command:
+  #     - "http"
+  #     - "http://feeds:5000"
+  #     - "--url"
+  #     - ${NGROK_URL}
+  #   ports:
+  #     - "4040:4040"
+  #   depends_on:
+  #     - feeds
 
 volumes:
   pgdata:
